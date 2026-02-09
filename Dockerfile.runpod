@@ -1,0 +1,60 @@
+# Use CUDA 12.3.1 runtime as base image (similar to Dockerfile.cuda12)
+FROM nvidia/cuda:12.3.1-runtime-ubuntu22.04
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    build-essential \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set python3.11 as default
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python && \
+    ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+
+# Install uv for fast package management
+RUN pip install uv
+
+# Create virtual environment and add to path
+ENV PATH="/.venv/bin:${PATH}"
+RUN uv venv --python 3.11 /.venv
+
+# Install onnxruntime-gpu for CUDA 12 explicitly
+RUN uv pip install onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+
+# ============================================================
+# Layer Caching Optimization: Copy rarely-changed files first
+# ============================================================
+
+# Step 1: Copy dependency definition files (rarely changed)
+COPY pyproject.toml README.md /app/
+
+# Step 2: Copy the audio_separator package (core library, less frequently changed)
+COPY audio_separator /app/audio_separator
+
+# Step 3: Install dependencies (cached unless pyproject.toml or audio_separator changes)
+RUN uv pip install runpod requests uuid6 boto3 && \
+    uv pip install -e /app
+
+# Step 4: Create directory for models and download them (cached)
+RUN mkdir -p /models
+COPY download_models.py /app/
+RUN python /app/download_models.py
+
+# ============================================================
+# Handler code: Copy last (frequently changed)
+# ============================================================
+COPY runpod_handler.py runpod_schemas.py runpod_exceptions.py test_input.json /app/
+
+# Run the RunPod handler
+CMD ["python", "-u", "/app/runpod_handler.py"]

@@ -1,0 +1,14 @@
+{
+    "input": {
+        "tag": "local-test-run",
+        "input": {
+            "mode": "presigned_url",
+            "presigned_url": "https://github.com/ouor/worker-audio-separator/raw/refs/heads/main/tests/inputs/mardy20s.flac"
+        },
+        "model": "UVR-MDX-NET-Voc_FT.onnx",
+        "stems": [
+            "instrumental",
+            "vocals"
+        ]
+    }
+}
