@@ -41,6 +41,7 @@ from runpod_exceptions import (
 # Constants
 # =============================================================================
 
+S3_BASE_PREFIX = "worker-audio-separator"
 SAMPLE_RATE = 48000
 OPUS_BITRATE = "128k"
 PRESIGNED_URL_EXPIRY_SECONDS = 3600 * 24  # 24 hours
@@ -357,7 +358,7 @@ class AudioWorker:
             work_dir=work_dir,
             input_dir=input_dir,
             output_dir=output_dir,
-            s3_prefix=f"requests-{request_id}",
+            s3_prefix=f"{S3_BASE_PREFIX}/requests-{request_id}",
             start_time=start_time_total,
         )
 
