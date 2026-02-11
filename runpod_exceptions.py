@@ -24,6 +24,3 @@ class NetworkError(AudioSeparatorError):
     """Raised when external resource downloads fail."""
     def __init__(self, message):
         super().__init__(message, error_code="NETWORK_ERROR")
-    """Raised when external resource downloads fail."""
-    def __init__(self, message):
-        super().__init__(message, error_code="NETWORK_ERROR")

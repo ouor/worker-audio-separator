@@ -1,14 +1,16 @@
 {
     "input": {
         "tag": "local-test-run",
-        "input": {
-            "mode": "presigned_url",
-            "presigned_url": "https://github.com/ouor/worker-audio-separator/raw/refs/heads/main/tests/inputs/mardy20s.flac"
-        },
-        "model": "UVR-MDX-NET-Voc_FT.onnx",
+        "input_urls": [
+            "https://github.com/ouor/worker-audio-separator/raw/refs/heads/main/tests/inputs/mardy20s.flac"
+        ],
+        "model_name": "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
         "stems": [
-            "instrumental",
-            "vocals"
-        ]
+            "vocals",
+            "instrumental"
+        ],
+        "format": "OPUS",
+        "bitrate": "128k",
+        "sample_rate": 48000
     }
 }
