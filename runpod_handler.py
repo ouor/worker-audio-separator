@@ -22,6 +22,7 @@ import traceback
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, unquote
 
 import boto3
 import requests as http_requests
@@ -201,14 +202,20 @@ class AudioWorker:
         """Run ffprobe and return parsed JSON."""
         cmd = ["ffprobe", "-v", "error", "-show_format",
                "-show_streams", "-of", "json", path]
+        logger.info(f"Running ffprobe: {' '.join(cmd)}")
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     timeout=FFPROBE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             raise AudioValidationError(
                 f"ffprobe timed out after {FFPROBE_TIMEOUT_SECONDS}s - file may be corrupt")
+        
         if result.returncode != 0:
+            logger.error(f"ffprobe failed: {result.stderr}")
             raise AudioValidationError(f"ffprobe failed: {result.stderr}")
+        
+        if result.stderr:
+            logger.debug(f"ffprobe output: {result.stderr}")
         return json.loads(result.stdout)
 
     def get_audio_metadata(self, path: str) -> Dict[str, Any]:
@@ -246,12 +253,18 @@ class AudioWorker:
             cmd.extend(["-b:a", bitrate])
         cmd.append(dst)
 
+        logger.info(f"Running FFmpeg: {' '.join(cmd)}")
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     timeout=FFMPEG_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
+            logger.error(f"FFmpeg timed out: {' '.join(cmd)}")
             raise AudioValidationError(
                 f"FFmpeg timed out after {FFMPEG_TIMEOUT_SECONDS}s")
+
+        if result.stderr:
+            logger.info(f"FFmpeg output: {result.stderr.strip()}")
+
         if result.returncode != 0:
             stderr = result.stderr.lower()
             if any(k in stderr for k in ("invalid data", "invalid argument",
@@ -264,12 +277,18 @@ class AudioWorker:
         """Convert any source to 44100 Hz WAV for model inference."""
         cmd = ["ffmpeg", "-y", "-loglevel", "warning",
                "-i", src, "-ar", "44100", "-c:a", "pcm_s16le", dst]
+        logger.info(f"Running FFmpeg (WAV conversion): {' '.join(cmd)}")
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     timeout=FFMPEG_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
+            logger.error(f"FFmpeg (WAV) timed out: {' '.join(cmd)}")
             raise AudioValidationError(
                 f"WAV conversion timed out after {FFMPEG_TIMEOUT_SECONDS}s")
+
+        if result.stderr:
+            logger.info(f"FFmpeg (WAV) output: {result.stderr.strip()}")
+
         if result.returncode != 0:
             raise AudioValidationError(
                 f"WAV conversion failed: {result.stderr}")
@@ -371,7 +390,7 @@ class AudioWorker:
         return elapsed
 
     # Stage 4: separate
-    def _separate_audio(self, wav_path: str) -> List[str]:
+    def _separate_audio(self, wav_path: str, custom_output_names: Optional[Dict[str, str]] = None) -> List[str]:
         """
         Run separation inference.
 
@@ -381,7 +400,7 @@ class AudioWorker:
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
             logger.info(f"Separation starting: {wav_path}")
-            outputs = self.separator.separate(wav_path)
+            outputs = self.separator.separate(wav_path, custom_output_names=custom_output_names)
             logger.info(f"Separation complete: {len(outputs)} stems produced")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -478,6 +497,22 @@ class AudioWorker:
         out_bitrate: str = inp.get("bitrate", "128k")
         out_sr: int = inp.get("sample_rate", 48000)
 
+        # Internal mapping for predictable temporary filenames
+        custom_names = {
+            "Vocals": "vocals",
+            "Instrumental": "instrumental",
+            "Instruments": "instrumental",
+            "Drums": "drums",
+            "Bass": "bass",
+            "Other": "other",
+            "Guitar": "guitar",
+            "Piano": "piano",
+            "Synthesizer": "synth",
+            "Strings": "strings",
+            "Woodwinds": "woodwinds",
+            "Brass": "brass",
+        }
+
         # --- Prepare working dirs ---
         work_dir = os.path.join(WORK_DIR_BASE, job_id)
         input_dir = os.path.join(work_dir, "input")
@@ -501,17 +536,49 @@ class AudioWorker:
         try:
             # ---- Stage 1: download ----
             t0 = time.perf_counter()
-            raw_path = os.path.join(input_dir, "original")
             if not input_urls:
                 return self._fail("EMPTY_INPUT_URL", "At least one URL required",
                                   raw_request, request_id, started_at,
                                   work_dir=work_dir)
             source_url = input_urls[0]
-            self._download_file(source_url, raw_path)
+            
+            # Use temporary download path to detect extension
+            download_path = os.path.join(input_dir, "download.tmp")
+            self._download_file(source_url, download_path)
             perf["download_file"] = round(time.perf_counter() - t0, 3)
 
+            # Determine extension
+            ext = ".bin"
+            try:
+                # 1. Try detection via ffprobe (most reliable)
+                meta = self.get_audio_metadata(download_path)
+                fmt_name = meta.get("format", "").split(',')[0]
+                if fmt_name:
+                    # Map some ffprobe format names to common extensions
+                    ext_map = {
+                        "matroska": "mkv",
+                        "mov,mp4,m4a,3gp,3g2,mj2": "m4a",
+                        "asf": "wma",
+                        "ogg": "ogg",
+                    }
+                    ext = ext_map.get(fmt_name, fmt_name)
+                    if not ext.startswith("."):
+                        ext = f".{ext}"
+            except Exception:
+                # 2. Fallback to URL path extension
+                try:
+                    p = unquote(urlparse(source_url).path)
+                    url_ext = os.path.splitext(p)[1].lower()
+                    if url_ext:
+                        ext = url_ext
+                except:
+                    pass
+
+            raw_path = os.path.join(input_dir, f"original{ext}")
+            os.rename(download_path, raw_path)
+
             # Upload original input file to R2
-            input_key = f"{s3_prefix}/original"
+            input_key = f"{s3_prefix}/original{ext}"
             self._upload_file(raw_path, input_key)
             logger.info(f"Uploaded original input: {input_key}")
 
@@ -529,7 +596,7 @@ class AudioWorker:
             # ---- Stage 4: separate ----
             t0 = time.perf_counter()
             power_before = self._get_gpu_power_draw()
-            raw_outputs = self._separate_audio(wav_path)
+            raw_outputs = self._separate_audio(wav_path, custom_output_names=custom_names)
             power_after = self._get_gpu_power_draw()
             peak_power = max(power_before, power_after)
             if torch.cuda.is_available():
@@ -541,10 +608,18 @@ class AudioWorker:
             t0 = time.perf_counter()
             encoded: List[Dict[str, Any]] = []
             for wav_stem_path in raw_outputs:
-                full_path = os.path.join(output_dir, os.path.basename(wav_stem_path))
-                # Extract stem name from "(Name)" pattern
-                m = re.search(r"\(([^)]+)\)", os.path.basename(wav_stem_path))
-                stem = m.group(1) if m else "Other"
+                fname = os.path.basename(wav_stem_path)
+                full_path = os.path.join(output_dir, fname)
+                
+                # Extract stem name
+                # 1. Try to find name in parentheses (default behavior)
+                # 2. Else use filename root (custom name behavior)
+                m = re.search(r"\(([^)]+)\)", fname)
+                if m:
+                    stem = m.group(1)
+                else:
+                    stem = os.path.splitext(fname)[0]
+                
                 # Filter
                 if requested_lower and stem.lower() not in requested_lower:
                     logger.info(f"Skipping stem '{stem}' (not in requested: {requested_stems})")
